@@ -4,6 +4,8 @@ from uuid import uuid4
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.services.media import inspect_video
+
 app = FastAPI(title="ClipForge API", version="0.1.0")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -13,6 +15,8 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv"}
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 CHUNK_SIZE = 1024 * 1024  # 1 MB
+EXPECTED_ASPECT_RATIO = 16 / 9
+ASPECT_RATIO_TOLERANCE = 0.03
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,8 +54,6 @@ async def upload_video(video: UploadFile = File(...)):
                 bytes_written += len(chunk)
 
                 if bytes_written > MAX_UPLOAD_BYTES:
-                    output_file.close()
-                    destination.unlink(missing_ok=True)
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                         detail="Video must be 500 MB or smaller.",
@@ -59,6 +61,7 @@ async def upload_video(video: UploadFile = File(...)):
 
                 output_file.write(chunk)
     except HTTPException:
+        destination.unlink(missing_ok=True)
         raise
     except Exception as error:
         destination.unlink(missing_ok=True)
@@ -69,10 +72,29 @@ async def upload_video(video: UploadFile = File(...)):
     finally:
         await video.close()
 
+    try:
+        video_metadata = inspect_video(destination)
+    except (RuntimeError, ValueError) as error:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    actual_aspect_ratio = video_metadata["width"] / video_metadata["height"]
+
+    if abs(actual_aspect_ratio - EXPECTED_ASPECT_RATIO) > ASPECT_RATIO_TOLERANCE:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ClipForge currently accepts 16:9 horizontal videos only.",
+        )
+
     return {
         "job_id": job_id,
         "original_filename": original_name,
         "stored_filename": saved_filename,
         "size_bytes": bytes_written,
+        "video": video_metadata,
         "status": "uploaded",
     }
