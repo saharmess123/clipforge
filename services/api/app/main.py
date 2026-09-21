@@ -4,6 +4,8 @@ from uuid import uuid4
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.services.clip_planner import suggest_clips
+from app.services.job_store import create_job, get_job, save_job
 from app.services.media import inspect_video
 
 app = FastAPI(title="ClipForge API", version="0.1.0")
@@ -13,8 +15,8 @@ UPLOADS_DIR = PROJECT_ROOT / "data" / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv"}
-MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
-CHUNK_SIZE = 1024 * 1024  # 1 MB
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+CHUNK_SIZE = 1024 * 1024
 EXPECTED_ASPECT_RATIO = 16 / 9
 ASPECT_RATIO_TOLERANCE = 0.03
 
@@ -90,6 +92,18 @@ async def upload_video(video: UploadFile = File(...)):
             detail="ClipForge currently accepts 16:9 horizontal videos only.",
         )
 
+    create_job(
+        {
+            "job_id": job_id,
+            "original_filename": original_name,
+            "stored_filename": saved_filename,
+            "size_bytes": bytes_written,
+            "video": video_metadata,
+            "status": "uploaded",
+            "clips": [],
+        }
+    )
+
     return {
         "job_id": job_id,
         "original_filename": original_name,
@@ -98,3 +112,31 @@ async def upload_video(video: UploadFile = File(...)):
         "video": video_metadata,
         "status": "uploaded",
     }
+
+
+@app.post("/api/jobs/{job_id}/clips/suggest")
+def suggest_job_clips(job_id: str, clip_length_seconds: int = 30):
+    job = get_job(job_id)
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found.",
+        )
+
+    try:
+        clips = suggest_clips(
+            duration_seconds=job["video"]["duration_seconds"],
+            clip_length_seconds=clip_length_seconds,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    job["clips"] = clips
+    job["status"] = "clips_suggested"
+    save_job(job)
+
+    return job
