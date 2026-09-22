@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.schemas import ClipUpdate
+from app.services.archive import create_clips_archive
 from app.services.clip_planner import MIN_CLIP_LENGTH_SECONDS, suggest_clips
 from app.services.job_store import create_job, get_job, save_job
 from app.services.media import inspect_video
@@ -33,6 +34,49 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["*"],
 )
+
+
+def get_required_job(job_id: str) -> dict:
+    job = get_job(job_id)
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found.",
+        )
+
+    return job
+
+
+def get_required_clip(job: dict, clip_id: str) -> dict:
+    clip = next(
+        (saved_clip for saved_clip in job["clips"] if saved_clip["clip_id"] == clip_id),
+        None,
+    )
+
+    if clip is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clip not found.",
+        )
+
+    return clip
+
+
+def get_input_path(job: dict) -> Path:
+    input_path = UPLOADS_DIR / job["stored_filename"]
+
+    if not input_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The uploaded source video could not be found.",
+        )
+
+    return input_path
+
+
+def get_export_path(job_id: str, clip_id: str) -> Path:
+    return EXPORTS_DIR / job_id / f"{clip_id}.mp4"
 
 
 @app.get("/health")
@@ -98,37 +142,24 @@ async def upload_video(video: UploadFile = File(...)):
             detail="ClipForge currently accepts 16:9 horizontal videos only.",
         )
 
-    create_job(
-        {
-            "job_id": job_id,
-            "original_filename": original_name,
-            "stored_filename": saved_filename,
-            "size_bytes": bytes_written,
-            "video": video_metadata,
-            "status": "uploaded",
-            "clips": [],
-        }
-    )
-
-    return {
+    job = {
         "job_id": job_id,
         "original_filename": original_name,
         "stored_filename": saved_filename,
         "size_bytes": bytes_written,
         "video": video_metadata,
         "status": "uploaded",
+        "clips": [],
     }
+
+    create_job(job)
+
+    return job
 
 
 @app.post("/api/jobs/{job_id}/clips/suggest")
 def suggest_job_clips(job_id: str, clip_length_seconds: int = 30):
-    job = get_job(job_id)
-
-    if job is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Job not found.",
-        )
+    job = get_required_job(job_id)
 
     try:
         clips = suggest_clips(
@@ -149,38 +180,23 @@ def suggest_job_clips(job_id: str, clip_length_seconds: int = 30):
 
 
 @app.patch("/api/jobs/{job_id}/clips/{clip_id}")
-def update_clip(
+def update_clip_timing(
     job_id: str,
     clip_id: str,
-    clip_update: ClipUpdate,
+    update: ClipUpdate,
 ):
-    job = get_job(job_id)
-
-    if job is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Job not found.",
-        )
-
-    clip = next(
-        (saved_clip for saved_clip in job["clips"] if saved_clip["clip_id"] == clip_id),
-        None,
-    )
-
-    if clip is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Clip not found.",
-        )
+    job = get_required_job(job_id)
+    clip = get_required_clip(job, clip_id)
 
     video_duration = job["video"]["duration_seconds"]
-    clip_duration = clip_update.end_seconds - clip_update.start_seconds
 
-    if clip_update.end_seconds > video_duration:
+    if update.end_seconds > video_duration:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Clip end time cannot exceed the video duration.",
+            detail="Clip end time cannot be after the source video duration.",
         )
+
+    clip_duration = update.end_seconds - update.start_seconds
 
     if clip_duration < MIN_CLIP_LENGTH_SECONDS:
         raise HTTPException(
@@ -190,11 +206,12 @@ def update_clip(
             ),
         )
 
-    clip["start_seconds"] = round(clip_update.start_seconds, 2)
-    clip["end_seconds"] = round(clip_update.end_seconds, 2)
+    clip["start_seconds"] = round(update.start_seconds, 2)
+    clip["end_seconds"] = round(update.end_seconds, 2)
     clip["duration_seconds"] = round(clip_duration, 2)
+    clip["status"] = "draft"
+    clip.pop("export_filename", None)
 
-    job["status"] = "clips_updated"
     save_job(job)
 
     return clip
@@ -202,35 +219,10 @@ def update_clip(
 
 @app.post("/api/jobs/{job_id}/clips/{clip_id}/export")
 def export_clip(job_id: str, clip_id: str):
-    job = get_job(job_id)
-
-    if job is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Job not found.",
-        )
-
-    clip = next(
-        (saved_clip for saved_clip in job["clips"] if saved_clip["clip_id"] == clip_id),
-        None,
-    )
-
-    if clip is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Clip not found.",
-        )
-
-    input_path = UPLOADS_DIR / job["stored_filename"]
-
-    if not input_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="The original uploaded video is no longer available.",
-        )
-
-    output_filename = f"{job_id}-{clip_id}.mp4"
-    output_path = EXPORTS_DIR / output_filename
+    job = get_required_job(job_id)
+    clip = get_required_clip(job, clip_id)
+    input_path = get_input_path(job)
+    output_path = get_export_path(job_id, clip_id)
 
     try:
         render_vertical_clip(
@@ -245,9 +237,9 @@ def export_clip(job_id: str, clip_id: str):
             detail=str(error),
         ) from error
 
-    clip["output_filename"] = output_filename
     clip["status"] = "exported"
-    job["status"] = "clip_exported"
+    clip["export_filename"] = output_path.name
+    job["status"] = "exported"
     save_job(job)
 
     return {
@@ -258,35 +250,99 @@ def export_clip(job_id: str, clip_id: str):
 
 @app.get("/api/jobs/{job_id}/clips/{clip_id}/download")
 def download_clip(job_id: str, clip_id: str):
-    job = get_job(job_id)
+    job = get_required_job(job_id)
+    clip = get_required_clip(job, clip_id)
+    export_filename = clip.get("export_filename")
 
-    if job is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Job not found.",
-        )
-
-    clip = next(
-        (saved_clip for saved_clip in job["clips"] if saved_clip["clip_id"] == clip_id),
-        None,
-    )
-
-    if clip is None or "output_filename" not in clip:
+    if not export_filename:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="This clip has not been exported yet.",
         )
 
-    output_path = EXPORTS_DIR / clip["output_filename"]
+    output_path = EXPORTS_DIR / job_id / export_filename
 
     if not output_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="The exported clip file is no longer available.",
+            detail="The exported clip file could not be found.",
         )
 
     return FileResponse(
-        output_path,
+        path=output_path,
         media_type="video/mp4",
-        filename=clip["output_filename"],
+        filename=output_path.name,
+    )
+
+
+@app.post("/api/jobs/{job_id}/export")
+def export_all_clips(job_id: str):
+    job = get_required_job(job_id)
+
+    if not job["clips"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Generate clip suggestions before exporting.",
+        )
+
+    input_path = get_input_path(job)
+    exported_paths: list[Path] = []
+
+    try:
+        for clip in job["clips"]:
+            output_path = get_export_path(job_id, clip["clip_id"])
+
+            render_vertical_clip(
+                input_path=input_path,
+                output_path=output_path,
+                start_seconds=clip["start_seconds"],
+                end_seconds=clip["end_seconds"],
+            )
+
+            clip["status"] = "exported"
+            clip["export_filename"] = output_path.name
+            exported_paths.append(output_path)
+
+        archive_path = EXPORTS_DIR / job_id / f"{job_id}-clips.zip"
+        create_clips_archive(exported_paths, archive_path)
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(error),
+        ) from error
+
+    job["status"] = "exported"
+    job["archive_filename"] = archive_path.name
+    save_job(job)
+
+    return {
+        "job_id": job_id,
+        "clip_count": len(exported_paths),
+        "download_url": f"/api/jobs/{job_id}/download",
+    }
+
+
+@app.get("/api/jobs/{job_id}/download")
+def download_all_clips(job_id: str):
+    job = get_required_job(job_id)
+    archive_filename = job.get("archive_filename")
+
+    if not archive_filename:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No ZIP archive has been created for this job yet.",
+        )
+
+    archive_path = EXPORTS_DIR / job_id / archive_filename
+
+    if not archive_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The ZIP archive could not be found.",
+        )
+
+    return FileResponse(
+        path=archive_path,
+        media_type="application/zip",
+        filename=archive_path.name,
     )
