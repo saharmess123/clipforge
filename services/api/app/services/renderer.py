@@ -1,6 +1,8 @@
 import subprocess
 from pathlib import Path
 
+from app.services.subject_tracker import find_subject_center_x
+
 
 def render_vertical_clip(
     input_path: Path,
@@ -15,8 +17,14 @@ def render_vertical_clip(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    subject_center_x = find_subject_center_x(input_path)
+
     video_filter = (
-        "crop=trunc(ih*9/16/2)*2:ih:(iw-ow)/2:0,"
+        "crop="
+        "trunc(ih*9/16/2)*2:"
+        "ih:"
+        f"max(0\\,min(iw-ow\\,({subject_center_x}*iw)-(ow/2))):"
+        "0,"
         "scale=1080:1920:flags=lanczos,"
         "setsar=1"
     )
