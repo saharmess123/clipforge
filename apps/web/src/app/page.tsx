@@ -8,6 +8,7 @@ type Clip = {
   end_seconds: number;
   duration_seconds: number;
   status: string;
+  output_filename?: string;
 };
 
 type UploadResult = {
@@ -22,6 +23,10 @@ type UploadResult = {
   };
 };
 
+type JobResult = UploadResult & {
+  clips: Clip[];
+};
+
 const API_URL = "http://localhost:8000";
 const ACCEPTED_VIDEO_TYPES = ".mp4,.mov,.mkv";
 
@@ -29,15 +34,23 @@ function formatFileSize(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
+function formatSeconds(seconds: number) {
+  return `${Number(seconds.toFixed(2))}s`;
+}
+
 export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
   const [clips, setClips] = useState<Clip[]>([]);
+  const [draftTimes, setDraftTimes] = useState<
+    Record<string, { start_seconds: string; end_seconds: string }>
+  >({});
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [isSuggesting, setIsSuggesting] = useState(false);
-  const [savingClipId, setSavingClipId] = useState<string | null>(null);
+  const [savingClipId, setSavingClipId] = useState("");
+  const [exportingClipId, setExportingClipId] = useState("");
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
@@ -45,6 +58,7 @@ export default function Home() {
     setSelectedFile(file);
     setUploadResult(null);
     setClips([]);
+    setDraftTimes({});
     setErrorMessage("");
     setSuccessMessage("");
   }
@@ -60,6 +74,7 @@ export default function Home() {
     setSuccessMessage("");
     setUploadResult(null);
     setClips([]);
+    setDraftTimes({});
 
     const formData = new FormData();
     formData.append("video", selectedFile);
@@ -77,6 +92,7 @@ export default function Home() {
       }
 
       setUploadResult(payload);
+      setSuccessMessage("Video uploaded and validated.");
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : "Upload failed.",
@@ -97,19 +113,33 @@ export default function Home() {
 
     try {
       const response = await fetch(
-        `${API_URL}/api/jobs/${uploadResult.job_id}/clips/suggest?clip_length_seconds=30`,
+        `${API_URL}/api/jobs/${uploadResult.job_id}/clips/suggest`,
         {
           method: "POST",
         },
       );
 
-      const payload = await response.json();
+      const payload: JobResult | { detail?: string } = await response.json();
 
       if (!response.ok) {
-        throw new Error(payload.detail ?? "Could not suggest clips.");
+        throw new Error(
+          "detail" in payload ? payload.detail ?? "Could not suggest clips." : "Could not suggest clips.",
+        );
       }
 
-      setClips(payload.clips ?? []);
+      const job = payload as JobResult;
+      setClips(job.clips);
+      setDraftTimes(
+        Object.fromEntries(
+          job.clips.map((clip) => [
+            clip.clip_id,
+            {
+              start_seconds: String(clip.start_seconds),
+              end_seconds: String(clip.end_seconds),
+            },
+          ]),
+        ),
+      );
       setSuccessMessage("Clip suggestions are ready. You can adjust their times.");
     } catch (error) {
       setErrorMessage(
@@ -120,77 +150,134 @@ export default function Home() {
     }
   }
 
-  function updateClipTime(
+  function updateDraftTime(
     clipId: string,
     field: "start_seconds" | "end_seconds",
     value: string,
   ) {
-    const numericValue = Number(value);
-
-    setClips((currentClips) =>
-      currentClips.map((clip) => {
-        if (clip.clip_id !== clipId) {
-          return clip;
-        }
-
-        const updatedClip = {
-          ...clip,
-          [field]: numericValue,
-        };
-
-        return {
-          ...updatedClip,
-          duration_seconds: Number(
-            (updatedClip.end_seconds - updatedClip.start_seconds).toFixed(2),
-          ),
-        };
-      }),
-    );
+    setDraftTimes((current) => ({
+      ...current,
+      [clipId]: {
+        ...current[clipId],
+        [field]: value,
+      },
+    }));
   }
 
-  async function handleSaveClip(clip: Clip) {
+  async function handleSaveClip(clipId: string) {
     if (!uploadResult) {
       return;
     }
 
-    setSavingClipId(clip.clip_id);
+    const draft = draftTimes[clipId];
+
+    if (!draft) {
+      return;
+    }
+
+    const startSeconds = Number(draft.start_seconds);
+    const endSeconds = Number(draft.end_seconds);
+
+    if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
+      setErrorMessage("Enter valid numeric start and end times.");
+      return;
+    }
+
+    setSavingClipId(clipId);
     setErrorMessage("");
     setSuccessMessage("");
 
     try {
       const response = await fetch(
-        `${API_URL}/api/jobs/${uploadResult.job_id}/clips/${clip.clip_id}`,
+        `${API_URL}/api/jobs/${uploadResult.job_id}/clips/${clipId}`,
         {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            start_seconds: clip.start_seconds,
-            end_seconds: clip.end_seconds,
+            start_seconds: startSeconds,
+            end_seconds: endSeconds,
           }),
         },
       );
 
-      const payload = await response.json();
+      const payload: Clip | { detail?: string } = await response.json();
 
       if (!response.ok) {
-        throw new Error(payload.detail ?? "Could not save this clip.");
+        throw new Error(
+          "detail" in payload ? payload.detail ?? "Could not save this clip." : "Could not save this clip.",
+        );
       }
 
-      setClips((currentClips) =>
-        currentClips.map((savedClip) =>
-          savedClip.clip_id === clip.clip_id ? payload : savedClip,
+      const savedClip = payload as Clip;
+
+      setClips((current) =>
+        current.map((clip) =>
+          clip.clip_id === clipId ? savedClip : clip,
         ),
       );
 
-      setSuccessMessage(`Clip ${clip.clip_id.replace("clip-", "")} was saved.`);
+      setDraftTimes((current) => ({
+        ...current,
+        [clipId]: {
+          start_seconds: String(savedClip.start_seconds),
+          end_seconds: String(savedClip.end_seconds),
+        },
+      }));
+
+      setSuccessMessage(`${clipId.replace("-", " ")} was saved.`);
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : "Could not save this clip.",
       );
     } finally {
-      setSavingClipId(null);
+      setSavingClipId("");
+    }
+  }
+
+  async function handleExportClip(clipId: string) {
+    if (!uploadResult) {
+      return;
+    }
+
+    setExportingClipId(clipId);
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const response = await fetch(
+        `${API_URL}/api/jobs/${uploadResult.job_id}/clips/${clipId}/export`,
+        {
+          method: "POST",
+        },
+      );
+
+      const payload: {
+        clip?: Clip;
+        download_url?: string;
+        detail?: string;
+      } = await response.json();
+
+      if (!response.ok || !payload.clip || !payload.download_url) {
+        throw new Error(payload.detail ?? "Could not export this clip.");
+      }
+
+      setClips((current) =>
+        current.map((clip) =>
+          clip.clip_id === clipId ? payload.clip! : clip,
+        ),
+      );
+
+      setSuccessMessage(`${clipId.replace("-", " ")} was exported as a vertical MP4.`);
+
+      window.open(`${API_URL}${payload.download_url}`, "_blank");
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Could not export this clip.",
+      );
+    } finally {
+      setExportingClipId("");
     }
   }
 
@@ -278,7 +365,7 @@ export default function Home() {
                 <div>
                   <dt className="text-slate-400">Duration</dt>
                   <dd className="mt-1 font-medium">
-                    {uploadResult.video.duration_seconds}s
+                    {formatSeconds(uploadResult.video.duration_seconds)}
                   </dd>
                 </div>
 
@@ -291,101 +378,127 @@ export default function Home() {
               </dl>
 
               <button
-                className="mt-5 w-full rounded-xl border border-cyan-400 px-4 py-3 font-semibold text-cyan-300 transition hover:bg-cyan-400 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-50"
+                className="mt-5 w-full rounded-xl border border-cyan-400 px-4 py-3 font-semibold text-cyan-300 transition hover:bg-cyan-400/10 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={isSuggesting}
                 onClick={handleSuggestClips}
                 type="button"
               >
-                {isSuggesting ? "Generating clip suggestions…" : "Suggest clips"}
+                {isSuggesting ? "Creating suggestions…" : "Suggest clips"}
               </button>
             </div>
           )}
         </section>
 
         {clips.length > 0 && (
-          <section className="mt-8 rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
-            <div className="flex items-center justify-between gap-4">
+          <section className="mt-8 rounded-2xl border border-slate-700 bg-slate-900 p-6">
+            <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-xl font-semibold">Suggested clips</h2>
                 <p className="mt-1 text-sm text-slate-400">
-                  Adjust the start and end time, then save the clip.
+                  Adjust timing, then export each vertical clip.
                 </p>
               </div>
 
-              <span className="rounded-full bg-cyan-400/10 px-3 py-1 text-sm font-medium text-cyan-300">
-                {clips.length} clip{clips.length === 1 ? "" : "s"}
+              <span className="rounded-full bg-cyan-500/15 px-3 py-1 text-sm text-cyan-300">
+                {clips.length} {clips.length === 1 ? "clip" : "clips"}
               </span>
             </div>
 
-            <div className="mt-5 space-y-4">
-              {clips.map((clip, index) => (
-                <article
-                  className="rounded-xl border border-slate-700 bg-slate-950 p-4"
-                  key={clip.clip_id}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <p className="font-semibold">Clip {index + 1}</p>
-                      <p className="mt-1 text-sm text-slate-400">
-                        Current duration: {clip.duration_seconds}s
-                      </p>
+            <div className="mt-6 space-y-4">
+              {clips.map((clip, index) => {
+                const draft = draftTimes[clip.clip_id] ?? {
+                  start_seconds: String(clip.start_seconds),
+                  end_seconds: String(clip.end_seconds),
+                };
+
+                return (
+                  <article
+                    className="rounded-xl border border-slate-700 bg-slate-950 p-5"
+                    key={clip.clip_id}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <h3 className="font-semibold">Clip {index + 1}</h3>
+                        <p className="mt-1 text-sm text-slate-400">
+                          Current duration: {formatSeconds(clip.duration_seconds)}
+                        </p>
+                      </div>
+
+                      <span className="rounded-full bg-slate-800 px-3 py-1 text-xs font-medium capitalize text-slate-300">
+                        {clip.status}
+                      </span>
                     </div>
 
-                    <span className="rounded-full bg-slate-800 px-3 py-1 text-xs font-medium capitalize text-slate-300">
-                      {clip.status}
-                    </span>
-                  </div>
+                    <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                      <label className="text-sm font-medium">
+                        Start time (seconds)
+                        <input
+                          className="mt-2 w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none transition focus:border-cyan-400"
+                          min="0"
+                          onChange={(event) =>
+                            updateDraftTime(
+                              clip.clip_id,
+                              "start_seconds",
+                              event.target.value,
+                            )
+                          }
+                          step="0.1"
+                          type="number"
+                          value={draft.start_seconds}
+                        />
+                      </label>
 
-                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                    <label className="text-sm font-medium text-slate-300">
-                      Start time (seconds)
-                      <input
-                        className="mt-2 w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-cyan-400"
-                        min="0"
-                        onChange={(event) =>
-                          updateClipTime(
-                            clip.clip_id,
-                            "start_seconds",
-                            event.target.value,
-                          )
-                        }
-                        step="0.1"
-                        type="number"
-                        value={clip.start_seconds}
-                      />
-                    </label>
+                      <label className="text-sm font-medium">
+                        End time (seconds)
+                        <input
+                          className="mt-2 w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none transition focus:border-cyan-400"
+                          min="0"
+                          onChange={(event) =>
+                            updateDraftTime(
+                              clip.clip_id,
+                              "end_seconds",
+                              event.target.value,
+                            )
+                          }
+                          step="0.1"
+                          type="number"
+                          value={draft.end_seconds}
+                        />
+                      </label>
+                    </div>
 
-                    <label className="text-sm font-medium text-slate-300">
-                      End time (seconds)
-                      <input
-                        className="mt-2 w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:border-cyan-400"
-                        min="0"
-                        onChange={(event) =>
-                          updateClipTime(
-                            clip.clip_id,
-                            "end_seconds",
-                            event.target.value,
-                          )
-                        }
-                        step="0.1"
-                        type="number"
-                        value={clip.end_seconds}
-                      />
-                    </label>
-                  </div>
+                    <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+                      <button
+                        className="rounded-lg bg-cyan-400 px-4 py-2.5 font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={savingClipId === clip.clip_id}
+                        onClick={() => handleSaveClip(clip.clip_id)}
+                        type="button"
+                      >
+                        {savingClipId === clip.clip_id
+                          ? "Saving…"
+                          : "Save clip timing"}
+                      </button>
 
-                  <button
-                    className="mt-4 rounded-lg bg-cyan-400 px-4 py-2 font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={savingClipId === clip.clip_id}
-                    onClick={() => handleSaveClip(clip)}
-                    type="button"
-                  >
-                    {savingClipId === clip.clip_id
-                      ? "Saving…"
-                      : "Save clip timing"}
-                  </button>
-                </article>
-              ))}
+                      <button
+                        className="rounded-lg border border-emerald-400 px-4 py-2.5 font-semibold text-emerald-300 transition hover:bg-emerald-400/10 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={exportingClipId === clip.clip_id}
+                        onClick={() => handleExportClip(clip.clip_id)}
+                        type="button"
+                      >
+                        {exportingClipId === clip.clip_id
+                          ? "Exporting vertical MP4…"
+                          : "Export vertical MP4"}
+                      </button>
+                    </div>
+
+                    {clip.output_filename && (
+                      <p className="mt-4 text-sm text-emerald-300">
+                        Exported: {clip.output_filename}
+                      </p>
+                    )}
+                  </article>
+                );
+              })}
             </div>
           </section>
         )}
