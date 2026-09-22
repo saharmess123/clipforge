@@ -3,17 +3,22 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from app.schemas import ClipUpdate
 from app.services.clip_planner import MIN_CLIP_LENGTH_SECONDS, suggest_clips
 from app.services.job_store import create_job, get_job, save_job
 from app.services.media import inspect_video
+from app.services.renderer import render_vertical_clip
 
 app = FastAPI(title="ClipForge API", version="0.1.0")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 UPLOADS_DIR = PROJECT_ROOT / "data" / "uploads"
+EXPORTS_DIR = PROJECT_ROOT / "data" / "exports"
+
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv"}
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
@@ -193,3 +198,95 @@ def update_clip(
     save_job(job)
 
     return clip
+
+
+@app.post("/api/jobs/{job_id}/clips/{clip_id}/export")
+def export_clip(job_id: str, clip_id: str):
+    job = get_job(job_id)
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found.",
+        )
+
+    clip = next(
+        (saved_clip for saved_clip in job["clips"] if saved_clip["clip_id"] == clip_id),
+        None,
+    )
+
+    if clip is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clip not found.",
+        )
+
+    input_path = UPLOADS_DIR / job["stored_filename"]
+
+    if not input_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The original uploaded video is no longer available.",
+        )
+
+    output_filename = f"{job_id}-{clip_id}.mp4"
+    output_path = EXPORTS_DIR / output_filename
+
+    try:
+        render_vertical_clip(
+            input_path=input_path,
+            output_path=output_path,
+            start_seconds=clip["start_seconds"],
+            end_seconds=clip["end_seconds"],
+        )
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(error),
+        ) from error
+
+    clip["output_filename"] = output_filename
+    clip["status"] = "exported"
+    job["status"] = "clip_exported"
+    save_job(job)
+
+    return {
+        "clip": clip,
+        "download_url": f"/api/jobs/{job_id}/clips/{clip_id}/download",
+    }
+
+
+@app.get("/api/jobs/{job_id}/clips/{clip_id}/download")
+def download_clip(job_id: str, clip_id: str):
+    job = get_job(job_id)
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found.",
+        )
+
+    clip = next(
+        (saved_clip for saved_clip in job["clips"] if saved_clip["clip_id"] == clip_id),
+        None,
+    )
+
+    if clip is None or "output_filename" not in clip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This clip has not been exported yet.",
+        )
+
+    output_path = EXPORTS_DIR / clip["output_filename"]
+
+    if not output_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The exported clip file is no longer available.",
+        )
+
+    return FileResponse(
+        output_path,
+        media_type="video/mp4",
+        filename=clip["output_filename"],
+    )
