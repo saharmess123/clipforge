@@ -4,7 +4,8 @@ from uuid import uuid4
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.services.clip_planner import suggest_clips
+from app.schemas import ClipUpdate
+from app.services.clip_planner import MIN_CLIP_LENGTH_SECONDS, suggest_clips
 from app.services.job_store import create_job, get_job, save_job
 from app.services.media import inspect_video
 
@@ -24,7 +25,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["*"],
 )
 
@@ -140,3 +141,55 @@ def suggest_job_clips(job_id: str, clip_length_seconds: int = 30):
     save_job(job)
 
     return job
+
+
+@app.patch("/api/jobs/{job_id}/clips/{clip_id}")
+def update_clip(
+    job_id: str,
+    clip_id: str,
+    clip_update: ClipUpdate,
+):
+    job = get_job(job_id)
+
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found.",
+        )
+
+    clip = next(
+        (saved_clip for saved_clip in job["clips"] if saved_clip["clip_id"] == clip_id),
+        None,
+    )
+
+    if clip is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Clip not found.",
+        )
+
+    video_duration = job["video"]["duration_seconds"]
+    clip_duration = clip_update.end_seconds - clip_update.start_seconds
+
+    if clip_update.end_seconds > video_duration:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Clip end time cannot exceed the video duration.",
+        )
+
+    if clip_duration < MIN_CLIP_LENGTH_SECONDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Clips must be at least {MIN_CLIP_LENGTH_SECONDS} seconds long."
+            ),
+        )
+
+    clip["start_seconds"] = round(clip_update.start_seconds, 2)
+    clip["end_seconds"] = round(clip_update.end_seconds, 2)
+    clip["duration_seconds"] = round(clip_duration, 2)
+
+    job["status"] = "clips_updated"
+    save_job(job)
+
+    return clip
