@@ -2,6 +2,14 @@
 
 import { ChangeEvent, useState } from "react";
 
+type Clip = {
+  clip_id: string;
+  start_seconds: number;
+  end_seconds: number;
+  duration_seconds: number;
+  status: string;
+};
+
 type UploadResult = {
   job_id: string;
   original_filename: string;
@@ -14,6 +22,7 @@ type UploadResult = {
   };
 };
 
+const API_URL = "http://localhost:8000";
 const ACCEPTED_VIDEO_TYPES = ".mp4,.mov,.mkv";
 
 function formatFileSize(bytes: number) {
@@ -23,14 +32,17 @@ function formatFileSize(bytes: number) {
 export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [clips, setClips] = useState<Clip[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
   const [isUploading, setIsUploading] = useState(false);
+  const [isSuggesting, setIsSuggesting] = useState(false);
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
 
     setSelectedFile(file);
     setUploadResult(null);
+    setClips([]);
     setErrorMessage("");
   }
 
@@ -43,12 +55,13 @@ export default function Home() {
     setIsUploading(true);
     setErrorMessage("");
     setUploadResult(null);
+    setClips([]);
 
     const formData = new FormData();
     formData.append("video", selectedFile);
 
     try {
-      const response = await fetch("http://localhost:8000/api/jobs/upload", {
+      const response = await fetch(`${API_URL}/api/jobs/upload`, {
         method: "POST",
         body: formData,
       });
@@ -66,6 +79,38 @@ export default function Home() {
       );
     } finally {
       setIsUploading(false);
+    }
+  }
+
+  async function handleSuggestClips() {
+    if (!uploadResult) {
+      return;
+    }
+
+    setIsSuggesting(true);
+    setErrorMessage("");
+
+    try {
+      const response = await fetch(
+        `${API_URL}/api/jobs/${uploadResult.job_id}/clips/suggest?clip_length_seconds=30`,
+        {
+          method: "POST",
+        },
+      );
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.detail ?? "Could not suggest clips.");
+      }
+
+      setClips(payload.clips ?? []);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Could not suggest clips.",
+      );
+    } finally {
+      setIsSuggesting(false);
     }
   }
 
@@ -158,9 +203,58 @@ export default function Home() {
                   </dd>
                 </div>
               </dl>
+
+              <button
+                className="mt-5 w-full rounded-xl border border-cyan-400 px-4 py-3 font-semibold text-cyan-300 transition hover:bg-cyan-400 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={isSuggesting}
+                onClick={handleSuggestClips}
+                type="button"
+              >
+                {isSuggesting ? "Generating clip suggestions…" : "Suggest clips"}
+              </button>
             </div>
           )}
         </section>
+
+        {clips.length > 0 && (
+          <section className="mt-8 rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-semibold">Suggested clips</h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  You will be able to adjust these ranges before export.
+                </p>
+              </div>
+
+              <span className="rounded-full bg-cyan-400/10 px-3 py-1 text-sm font-medium text-cyan-300">
+                {clips.length} clip{clips.length === 1 ? "" : "s"}
+              </span>
+            </div>
+
+            <div className="mt-5 space-y-3">
+              {clips.map((clip, index) => (
+                <article
+                  className="rounded-xl border border-slate-700 bg-slate-950 p-4"
+                  key={clip.clip_id}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="font-semibold">Clip {index + 1}</p>
+                      <p className="mt-1 text-sm text-slate-400">
+                        {clip.start_seconds}s → {clip.end_seconds}s ·{" "}
+                        {clip.duration_seconds}s total
+                      </p>
+                    </div>
+
+                    <span className="rounded-full bg-slate-800 px-3 py-1 text-xs font-medium capitalize text-slate-300">
+                      {clip.status}
+                    </span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </main>
   );
