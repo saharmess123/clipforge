@@ -1,7 +1,7 @@
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -11,6 +11,7 @@ from app.services.clip_planner import MIN_CLIP_LENGTH_SECONDS, suggest_clips
 from app.services.job_store import create_job, get_job, save_job
 from app.services.media import inspect_video
 from app.services.renderer import render_vertical_clip
+from app.services.youtube import download_youtube_video
 
 app = FastAPI(title="ClipForge API", version="0.1.0")
 
@@ -21,7 +22,7 @@ EXPORTS_DIR = PROJECT_ROOT / "data" / "exports"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv"}
+ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 EXPECTED_ASPECT_RATIO = 16 / 9
@@ -79,6 +80,28 @@ def get_export_path(job_id: str, clip_id: str) -> Path:
     return EXPORTS_DIR / job_id / f"{clip_id}.mp4"
 
 
+def validate_landscape_video(video_path: Path) -> dict:
+    try:
+        video_metadata = inspect_video(video_path)
+    except (RuntimeError, ValueError) as error:
+        video_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    actual_aspect_ratio = video_metadata["width"] / video_metadata["height"]
+
+    if abs(actual_aspect_ratio - EXPECTED_ASPECT_RATIO) > ASPECT_RATIO_TOLERANCE:
+        video_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="ClipForge currently accepts 16:9 horizontal videos only.",
+        )
+
+    return video_metadata
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -92,7 +115,7 @@ async def upload_video(video: UploadFile = File(...)):
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only .mp4, .mov, and .mkv video files are allowed.",
+            detail="Only .mp4, .mov, .mkv, and .webm video files are allowed.",
         )
 
     job_id = uuid4().hex
@@ -124,23 +147,7 @@ async def upload_video(video: UploadFile = File(...)):
     finally:
         await video.close()
 
-    try:
-        video_metadata = inspect_video(destination)
-    except (RuntimeError, ValueError) as error:
-        destination.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(error),
-        ) from error
-
-    actual_aspect_ratio = video_metadata["width"] / video_metadata["height"]
-
-    if abs(actual_aspect_ratio - EXPECTED_ASPECT_RATIO) > ASPECT_RATIO_TOLERANCE:
-        destination.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="ClipForge currently accepts 16:9 horizontal videos only.",
-        )
+    video_metadata = validate_landscape_video(destination)
 
     job = {
         "job_id": job_id,
@@ -150,6 +157,50 @@ async def upload_video(video: UploadFile = File(...)):
         "video": video_metadata,
         "status": "uploaded",
         "clips": [],
+        "source_type": "upload",
+    }
+
+    create_job(job)
+
+    return job
+
+
+@app.post("/api/jobs/youtube", status_code=status.HTTP_201_CREATED)
+def import_youtube_video(source_url: str = Body(embed=True)):
+    try:
+        downloaded_video = download_youtube_video(
+            source_url=source_url,
+            download_directory=UPLOADS_DIR,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+    video_path: Path = downloaded_video["video_path"]
+    extension = video_path.suffix.lower()
+
+    if extension not in ALLOWED_EXTENSIONS:
+        video_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="YouTube did not provide a supported video format.",
+        )
+
+    video_metadata = validate_landscape_video(video_path)
+    job_id = uuid4().hex
+
+    job = {
+        "job_id": job_id,
+        "original_filename": downloaded_video["title"],
+        "stored_filename": video_path.name,
+        "size_bytes": video_path.stat().st_size,
+        "video": video_metadata,
+        "status": "uploaded",
+        "clips": [],
+        "source_type": "youtube",
+        "source_url": downloaded_video["source_url"],
     }
 
     create_job(job)

@@ -3,3 +3,4 @@ uvicorn[standard]==0.53.0
 python-multipart==0.0.32
 opencv-python==5.0.0.93
 mediapipe==1.0.1
+yt-dlp==2026.2.4
