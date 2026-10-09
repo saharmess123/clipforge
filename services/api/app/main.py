@@ -80,6 +80,27 @@ def get_export_path(job_id: str, clip_id: str) -> Path:
     return EXPORTS_DIR / job_id / f"{clip_id}.mp4"
 
 
+def get_exported_clip_path(job: dict, clip_id: str) -> Path:
+    clip = get_required_clip(job, clip_id)
+    export_filename = clip.get("export_filename")
+
+    if not export_filename:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This clip has not been exported yet.",
+        )
+
+    output_path = EXPORTS_DIR / job["job_id"] / export_filename
+
+    if not output_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The exported clip file could not be found.",
+        )
+
+    return output_path
+
+
 def validate_landscape_video(video_path: Path) -> dict:
     try:
         video_metadata = inspect_video(video_path)
@@ -238,7 +259,6 @@ def update_clip_timing(
 ):
     job = get_required_job(job_id)
     clip = get_required_clip(job, clip_id)
-
     video_duration = job["video"]["duration_seconds"]
 
     if update.end_seconds > video_duration:
@@ -252,9 +272,7 @@ def update_clip_timing(
     if clip_duration < MIN_CLIP_LENGTH_SECONDS:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                f"Clips must be at least {MIN_CLIP_LENGTH_SECONDS} seconds long."
-            ),
+            detail=f"Clips must be at least {MIN_CLIP_LENGTH_SECONDS} seconds long.",
         )
 
     clip["start_seconds"] = round(update.start_seconds, 2)
@@ -295,29 +313,30 @@ def export_clip(job_id: str, clip_id: str):
 
     return {
         "clip": clip,
+        "preview_url": f"/api/jobs/{job_id}/clips/{clip_id}/preview",
         "download_url": f"/api/jobs/{job_id}/clips/{clip_id}/download",
     }
+
+
+@app.get("/api/jobs/{job_id}/clips/{clip_id}/preview")
+def preview_clip(job_id: str, clip_id: str):
+    job = get_required_job(job_id)
+    output_path = get_exported_clip_path(job, clip_id)
+
+    return FileResponse(
+        path=output_path,
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": "inline",
+            "Accept-Ranges": "bytes",
+        },
+    )
 
 
 @app.get("/api/jobs/{job_id}/clips/{clip_id}/download")
 def download_clip(job_id: str, clip_id: str):
     job = get_required_job(job_id)
-    clip = get_required_clip(job, clip_id)
-    export_filename = clip.get("export_filename")
-
-    if not export_filename:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="This clip has not been exported yet.",
-        )
-
-    output_path = EXPORTS_DIR / job_id / export_filename
-
-    if not output_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="The exported clip file could not be found.",
-        )
+    output_path = get_exported_clip_path(job, clip_id)
 
     return FileResponse(
         path=output_path,

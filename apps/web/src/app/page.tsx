@@ -373,6 +373,15 @@ export default function Home() {
   const [isExportingAll, setIsExportingAll] =
     useState(false);
 
+  const [previewClipId, setPreviewClipId] =
+    useState("");
+
+  const [previewUrl, setPreviewUrl] =
+    useState("");
+
+  const [zipDownloadUrl, setZipDownloadUrl] =
+    useState("");
+
   /* ------------------------------------------------------------------------ */
   /* Theme                                                                    */
   /* ------------------------------------------------------------------------ */
@@ -460,6 +469,9 @@ export default function Home() {
     setDraftTimes({});
     setErrorMessage("");
     setSuccessMessage("");
+    setPreviewClipId("");
+    setPreviewUrl("");
+    setZipDownloadUrl("");
   }
 
   /* ------------------------------------------------------------------------ */
@@ -494,6 +506,9 @@ export default function Home() {
     setUploadResult(null);
     setClips([]);
     setDraftTimes({});
+    setPreviewClipId("");
+    setPreviewUrl("");
+    setZipDownloadUrl("");
 
     const formData =
       new FormData();
@@ -565,6 +580,9 @@ export default function Home() {
     setUploadResult(null);
     setClips([]);
     setDraftTimes({});
+    setPreviewClipId("");
+    setPreviewUrl("");
+    setZipDownloadUrl("");
 
     try {
       const response = await fetch(
@@ -663,6 +681,10 @@ export default function Home() {
       setClips(
         job.clips,
       );
+
+      setPreviewClipId("");
+      setPreviewUrl("");
+      setZipDownloadUrl("");
 
       setDraftTimes(
         Object.fromEntries(
@@ -847,6 +869,13 @@ export default function Home() {
         }),
       );
 
+      if (previewClipId === clipId) {
+        setPreviewClipId("");
+        setPreviewUrl("");
+      }
+
+      setZipDownloadUrl("");
+
       setSuccessMessage(
         `${clipId.replace(
           "-",
@@ -893,6 +922,7 @@ export default function Home() {
 
       const payload: {
         clip?: Clip;
+        preview_url?: string;
         download_url?: string;
         detail?: string;
       } =
@@ -901,6 +931,7 @@ export default function Home() {
       if (
         !response.ok ||
         !payload.clip ||
+        !payload.preview_url ||
         !payload.download_url
       ) {
         throw new Error(
@@ -924,13 +955,22 @@ export default function Home() {
         `${clipId.replace(
           "-",
           " ",
-        )} exported successfully.`,
+        )} is ready to preview.`,
       );
 
-      window.open(
-        `${API_URL}${payload.download_url}`,
-        "_blank",
+      setPreviewClipId(clipId);
+      setPreviewUrl(
+        `${API_URL}${payload.preview_url}?v=${Date.now()}`,
       );
+
+      window.setTimeout(() => {
+        document
+          .getElementById("preview")
+          ?.scrollIntoView({
+            behavior: "smooth",
+            block: "center",
+          });
+      }, 0);
     } catch (error) {
       setErrorMessage(
         error instanceof Error
@@ -940,6 +980,38 @@ export default function Home() {
     } finally {
       setExportingClipId("");
     }
+  }
+
+  function handlePreviewClip(clipId: string) {
+    if (!uploadResult) {
+      return;
+    }
+
+    setPreviewClipId(clipId);
+    setPreviewUrl(
+      `${API_URL}/api/jobs/${uploadResult.job_id}/clips/${clipId}/preview?v=${Date.now()}`,
+    );
+
+    window.setTimeout(() => {
+      document
+        .getElementById("preview")
+        ?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+    }, 0);
+  }
+
+  function handleDownloadClip(clipId: string) {
+    if (!uploadResult) {
+      return;
+    }
+
+    window.open(
+      `${API_URL}/api/jobs/${uploadResult.job_id}/clips/${clipId}/download`,
+      "_blank",
+      "noopener,noreferrer",
+    );
   }
 
   /* ------------------------------------------------------------------------ */
@@ -991,12 +1063,18 @@ export default function Home() {
         `${
           payload.clip_count ??
           clips.length
-        } clips exported successfully.`,
+        } clips are ready as a ZIP file.`,
       );
 
-      window.open(
+      setZipDownloadUrl(
         `${API_URL}${payload.download_url}`,
-        "_blank",
+      );
+
+      setClips((current) =>
+        current.map((clip) => ({
+          ...clip,
+          status: "exported",
+        })),
       );
     } catch (error) {
       setErrorMessage(
@@ -1009,6 +1087,18 @@ export default function Home() {
         false,
       );
     }
+  }
+
+  function handleDownloadZip() {
+    if (!zipDownloadUrl) {
+      return;
+    }
+
+    window.open(
+      zipDownloadUrl,
+      "_blank",
+      "noopener,noreferrer",
+    );
   }
 
   /* ------------------------------------------------------------------------ */
@@ -1748,6 +1838,58 @@ export default function Home() {
           </section>
         )}
 
+        {previewUrl && uploadResult && (
+          <section
+            id="preview"
+            className={`mt-8 overflow-hidden rounded-[2rem] border p-5 shadow-lg sm:p-7 ${cardSolidClass}`}
+          >
+            <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <p className="text-xs font-black uppercase tracking-[0.22em] text-[#e36d4c]">
+                  Clip preview
+                </p>
+
+                <h2 className="mt-2 text-2xl font-black">
+                  Watch your vertical clip before downloading.
+                </h2>
+
+                <p className={`mt-2 text-sm ${mutedClass}`}>
+                  If it looks right, download the MP4. You can also edit the
+                  timing and export it again.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => handleDownloadClip(previewClipId)}
+                className="flex items-center justify-center gap-2 rounded-xl bg-[#d89b48] px-6 py-3.5 font-black text-[#26190e] transition hover:-translate-y-0.5 hover:bg-[#e2a955]"
+              >
+                <DownloadIcon />
+                Download MP4
+              </button>
+            </div>
+
+            <div
+              className={`mx-auto mt-6 w-full max-w-[360px] overflow-hidden rounded-[1.5rem] border p-2 shadow-xl ${
+                dark
+                  ? "border-white/[0.1] bg-black/30"
+                  : "border-[#4d392f]/10 bg-[#f4e7dc]"
+              }`}
+            >
+              <video
+                key={previewUrl}
+                autoPlay
+                controls
+                playsInline
+                className="aspect-[9/16] w-full rounded-[1rem] bg-black object-contain"
+              >
+                <source src={previewUrl} type="video/mp4" />
+                Your browser does not support video playback.
+              </video>
+            </div>
+          </section>
+        )}
+
         {/* ================================================================ */}
         {/* CLIPS                                                            */}
         {/* ================================================================ */}
@@ -1796,7 +1938,9 @@ export default function Home() {
                   isExportingAll
                 }
                 onClick={
-                  handleExportAll
+                  zipDownloadUrl
+                    ? handleDownloadZip
+                    : handleExportAll
                 }
                 className="flex items-center justify-center gap-2 rounded-xl bg-[#d89b48] px-6 py-3.5 font-black text-[#26190e] shadow-lg shadow-[#d89b48]/15 transition hover:-translate-y-0.5 hover:bg-[#e2a955] disabled:opacity-40"
               >
@@ -1804,7 +1948,9 @@ export default function Home() {
 
                 {isExportingAll
                   ? "Rendering all clips…"
-                  : "Export all as ZIP"}
+                  : zipDownloadUrl
+                    ? "Download ZIP"
+                    : "Export all as ZIP"}
               </button>
             </div>
 
@@ -2032,9 +2178,13 @@ export default function Home() {
                               clip.clip_id
                             }
                             onClick={() =>
-                              handleExportClip(
-                                clip.clip_id,
-                              )
+                              exported
+                                ? handlePreviewClip(
+                                    clip.clip_id,
+                                  )
+                                : handleExportClip(
+                                    clip.clip_id,
+                                  )
                             }
                             className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-black transition disabled:opacity-40 ${
                               exported
@@ -2048,7 +2198,7 @@ export default function Home() {
                             clip.clip_id
                               ? "Exporting…"
                               : exported
-                                ? "Download"
+                                ? "Preview"
                                 : "Export"}
                           </button>
                         </div>
@@ -2104,7 +2254,9 @@ export default function Home() {
                   isExportingAll
                 }
                 onClick={
-                  handleExportAll
+                  zipDownloadUrl
+                    ? handleDownloadZip
+                    : handleExportAll
                 }
                 className="flex items-center justify-center gap-2 rounded-xl bg-[#d89b48] px-7 py-3.5 font-black text-[#26190e] transition hover:bg-[#e2a955] disabled:opacity-40"
               >
@@ -2112,7 +2264,9 @@ export default function Home() {
 
                 {isExportingAll
                   ? "Rendering…"
-                  : `Export all ${clips.length} clips`}
+                  : zipDownloadUrl
+                    ? "Download ZIP"
+                    : `Export all ${clips.length} clips`}
               </button>
             </div>
           </section>
